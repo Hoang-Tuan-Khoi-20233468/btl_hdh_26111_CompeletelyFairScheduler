@@ -1,19 +1,35 @@
+name: xv6-cfs-ci
+
 on: [push, pull_request]
 
 jobs:
-  linux:
-    runs-on: ubuntu-26.04
+  rbtree-unit-test:
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-linux-gnu qemu-system-riscv clang-format bc
-      - run: make fmt && git diff --exit-code
-      - run: make kernel/kernel fs.img
-      - run: ./test-xv6.py usertests
-      - run: ./test-xv6.py crash
+      - uses: actions/checkout@v3
+      - name: Install C Compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc
+      - name: Run RB-Tree Unit Tests
+        run: make test_rbtree && ./test_rbtree
 
-  macos:
-    runs-on: macos-latest
+  xv6-tests:
+    needs: rbtree-unit-test
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - run: brew install riscv64-elf-gcc
-      - run: make kernel/kernel fs.img
+      - uses: actions/checkout@v3
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-linux-gnu qemu-system-riscv expect
+      - name: Compile and format check
+        run: make fmt && git diff --exit-code
+      - name: Build xv6
+        run: make kernel/kernel fs.img
+      - name: Make script executable
+        run: chmod +x ci/run_xv6_test.sh
+      - name: Run usertests at CPUS=1
+        run: ci/run_xv6_test.sh 1 "usertests -q" 1200 "ALL TESTS PASSED"
+      - name: Run usertests at CPUS=4
+        run: ci/run_xv6_test.sh 4 "usertests -q" 1200 "ALL TESTS PASSED"
+      - name: Run grind at CPUS=1
+        run: ci/run_xv6_test.sh 1 "grind" 120 ""
+      - name: Run grind at CPUS=4
+        run: ci/run_xv6_test.sh 4 "grind" 120 ""

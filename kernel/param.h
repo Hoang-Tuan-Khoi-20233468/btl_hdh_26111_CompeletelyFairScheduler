@@ -12,3 +12,5 @@
 #define FSSIZE      2000              // size of file system in blocks
 #define MAXPATH     128               // maximum file path name
 #define USERSTACK   1                 // user stack pages
+#define TARGET_LATENCY 60             // Chu kỳ tối đa để mọi tiến trình đều được chạy
+#define MIN_GRANULARITY 10           // Hạn ngạch tối thiểu (không bị cướp quyền quá nhanh)

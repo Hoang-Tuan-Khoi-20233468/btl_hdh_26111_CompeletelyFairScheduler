@@ -33,6 +33,7 @@ struct rb_root {
     *leftmost;    // Trỏ trực tiếp tới nút có vruntime nhỏ nhất -> lấy min O(1)
   int nr_running; // Tổng số tiến trình RUNNABLE hiện có trên cây
   uint64 min_vruntime;  // Giá trị vruntime nhỏ nhất của hệ thống hiện tại
+  uint64 load_weight;   // tổng weight của các tiến trình đang NẰM TRONG cây
   struct spinlock lock; // Khóa đồng bộ khi nhiều CPU cùng truy cập cây
 };
 

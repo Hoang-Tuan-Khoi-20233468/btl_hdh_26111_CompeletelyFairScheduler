@@ -112,3 +112,5 @@ struct proc {
   struct rb_node cfs_node; // Nút cây đỏ-đen nhúng trực tiếp vào proc
 };
 extern struct rb_root cfs_rq;
+#define SCHED_LATENCY   12  // target latency (ticks)
+#define SCHED_MIN_GRAN   2  // minimum granularity (ticks)

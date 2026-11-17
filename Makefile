@@ -167,7 +167,7 @@ clean:
 	$K/kernel fs.img \
 	mkfs/mkfs .gdbinit \
         $U/usys.S \
-	$(UPROGS)
+	$(UPROGS) test_rbtree
 
 # try to generate a unique GDB port
 GDBPORT = $(shell expr `id -u` % 5000 + 25000)
@@ -207,3 +207,8 @@ check-qemu-version:
 .PHONY: fmt
 fmt:
 	clang-format -i $(wildcard kernel/*.[ch] user/*.[ch] mkfs/*.c)
+
+.PHONY: test_rbtree
+test_rbtree: test/test_rbtree.c kernel/rbtree.c kernel/rbtree.h
+	gcc -std=gnu11 -Wall -Werror -g -fsanitize=address,undefined -I. -Ikernel \ 
+	    -o test_rbtree test/test_rbtree.c kernel/rbtree.c

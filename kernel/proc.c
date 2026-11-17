@@ -78,7 +78,35 @@ update_vruntime(struct proc *p)
 
   p->vruntime += delta_vruntime;
 }
+// Cần giữ cfs_rq.lock. p đã được gỡ khỏi cây (đang chuẩn bị chạy).
+static uint64
+cfs_calc_slice(struct proc *p)
+{
+  uint64 nr = cfs_rq.nr_running + 1;            // +1 là chính p
+  uint64 period = SCHED_LATENCY;
+  if (nr * SCHED_MIN_GRAN > period)             // quá đông: kéo dài chu kỳ
+    period = nr * SCHED_MIN_GRAN;
+  uint64 total = cfs_rq.load_weight + p->weight;
+  uint64 slice = period * p->weight / total;
+  if (slice < SCHED_MIN_GRAN)
+    slice = SCHED_MIN_GRAN;
+  return slice;
+}
 
+// Gọi mỗi tick sau update_vruntime(). 1 = p nên nhường CPU.
+int
+cfs_should_resched(struct proc *p)
+{
+  uint64 nr;
+  if (p == 0 || p->state != RUNNING)
+    return 0;
+  acquire(&cfs_rq.lock);
+  nr = cfs_rq.nr_running;
+  release(&cfs_rq.lock);
+  if (nr == 0)                                  // không ai tranh CPU
+    return 0;
+  return (p->runtime_ticks - p->start_tick) >= p->time_slice;
+}
 void
 proc_mapstacks(pagetable_t kpgtbl)
 {
@@ -123,6 +151,7 @@ cfs_enqueue(struct proc *p)
   p->cfs_node.vruntime = p->vruntime;
   acquire(&cfs_rq.lock);
   rb_insert(&cfs_rq, &p->cfs_node);
+  cfs_rq.load_weight += p->weight;
   release(&cfs_rq.lock);
 }
 
@@ -131,10 +160,11 @@ cfs_enqueue(struct proc *p)
 static void __attribute__((unused))
 cfs_dequeue(struct proc *p)
 {
-  if (!holding(&p->lock))
-    panic("cfs_dequeue: p->lock");
   acquire(&cfs_rq.lock);
-  rb_delete(&cfs_rq, &p->cfs_node);
+  if (p->cfs_node.on_rq) {
+    rb_delete(&cfs_rq, &p->cfs_node);
+    cfs_rq.load_weight -= p->weight;
+  }
   release(&cfs_rq.lock);
 }
 // Must be called with interrupts disabled,
@@ -576,7 +606,16 @@ scheduler(void)
     // Kiểm tra lại vì giữa Pha 1 và Pha 2 một CPU khác có thể đã lấy mất p
     if (p->state == RUNNABLE && p->cfs_node.on_rq) {
       rb_delete(&cfs_rq, &p->cfs_node);
+      cfs_rq.load_weight -= p->weight;
+      p->time_slice = cfs_calc_slice(p);   // tính khi còn giữ cfs_rq.lock
+      p->start_tick = p->runtime_ticks;    // mốc bắt đầu lượt chạy
       release(&cfs_rq.lock);
+      uint64 nr = cfs_rq.nr_running + 1; 
+      p->time_slice = (p->weight * TARGET_LATENCY) / (nr * 1024);
+      if (p->time_slice < MIN_GRANULARITY) {
+          p->time_slice = MIN_GRANULARITY;
+      }
+      p->start_tick = 0;
 
       // Switch to chosen process.  It is the process's job
       // to release its lock and then reacquire it

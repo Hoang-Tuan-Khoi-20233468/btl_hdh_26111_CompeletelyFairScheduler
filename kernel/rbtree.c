@@ -45,6 +45,7 @@ rb_init(struct rb_root *tree)
   tree->leftmost = NULL;
   tree->nr_running = 0;
   tree->min_vruntime = 0;
+  tree->load_weight = 0;
   initlock(&tree->lock, "rbtree");
 }
 
