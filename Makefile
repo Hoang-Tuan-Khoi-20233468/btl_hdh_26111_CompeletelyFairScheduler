@@ -209,6 +209,6 @@ fmt:
 	clang-format -i $(wildcard kernel/*.[ch] user/*.[ch] mkfs/*.c)
 
 .PHONY: test_rbtree
-test_rbtree: test/test_rbtree.c kernel/rbtree.c kernel/rbtree.h
-	gcc -std=gnu11 -Wall -Werror -g -fsanitize=address,undefined -I. -Ikernel \ 
-	    -o test_rbtree test/test_rbtree.c kernel/rbtree.c
+test_rbtree: tests/test_rbtree.c kernel/rbtree.c kernel/rbtree.h
+	gcc -std=gnu11 -Wall -Werror -g -fsanitize=address,undefined -I. -Ikernel \
+	    -o test_rbtree tests/test_rbtree.c kernel/rbtree.c
