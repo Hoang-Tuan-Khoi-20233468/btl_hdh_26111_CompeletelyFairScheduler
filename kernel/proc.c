@@ -6,6 +6,11 @@
 #include "proc.h"
 #include "defs.h"
 
+#define NICE_0_LOAD    1024ULL
+#define VRUNTIME_SCALE 1024ULL
+// Thưởng tối đa 1 tick chuẩn (1024) cho tiến trình ngủ dậy để vẫn phản hồi nhanh nhưng không chiếm dụng CPU
+#define SLEEPER_BONUS (NICE_0_LOAD * VRUNTIME_SCALE)
+
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -54,6 +59,29 @@ nice_to_weight(int nice)
   return prio_to_weight[nice + 20];
 }
 
+// Cập nhật min_vruntime đơn điệu tăng (gọi khi đang giữ cfs_rq.lock)
+static void
+update_min_vruntime(struct proc *curr)
+{
+  uint64 vruntime = cfs_rq.min_vruntime;
+
+  if (curr != 0 && curr->state == RUNNING) {
+    vruntime = curr->vruntime;
+  }
+
+  if (cfs_rq.leftmost != 0) {
+    if (curr == 0 || curr->state != RUNNING ||
+        cfs_rq.leftmost->vruntime < vruntime) {
+      vruntime = cfs_rq.leftmost->vruntime;
+    }
+  }
+
+  // Đảm bảo min_vruntime chỉ tăng hoặc giữ nguyên, không bao giờ giảm
+  if (vruntime > cfs_rq.min_vruntime) {
+    cfs_rq.min_vruntime = vruntime;
+  }
+}
+
 // Cập nhật vruntime và số tick đã chạy cho tiến trình hiện tại
 void
 update_vruntime(struct proc *p)
@@ -61,22 +89,26 @@ update_vruntime(struct proc *p)
   if (p == 0 || p->state != RUNNING)
     return;
 
+  // Đảm bảo weight hợp lệ TRƯỚC khi thực hiện phép chia
+  if (p->weight == 0)
+    p->weight = NICE_0_LOAD;
+
   // Mỗi ngắt timer tương ứng với 1 tick thực tế
   uint64 delta_exec = 1;
   p->runtime_ticks += delta_exec;
 
-  // Đảm bảo weight hợp lệ tránh chia cho 0
-  if (p->weight == 0)
-    p->weight = 1024;
-
-  // Tính gia số delta_vruntime bằng số nguyên
-  uint64 delta_vruntime = (delta_exec * 1024) / p->weight;
-
-  // Nếu weight quá lớn (> 1024) khiến phép chia nguyên bằng 0, gán tối thiểu 1
+  // Tính gia số vruntime với hệ số phóng đại (1024 * 1024)
+  uint64 delta_vruntime =
+    (delta_exec * NICE_0_LOAD * VRUNTIME_SCALE) / p->weight;
   if (delta_vruntime == 0)
     delta_vruntime = 1;
 
   p->vruntime += delta_vruntime;
+
+  // Đồng bộ lại min_vruntime của hàng đợi CFS
+  acquire(&cfs_rq.lock);
+  update_min_vruntime(p);
+  release(&cfs_rq.lock);
 }
 
 void
@@ -236,13 +268,13 @@ found:
 
   p->vruntime = base_vruntime;
   p->nice = 0;
-  p->weight = 1024;
+  p->weight = NICE_0_LOAD;
   p->start_tick = 0;
   p->runtime_ticks = 0;
   p->time_slice = 0;
   rb_node_init(&p->cfs_node, p);
   p->cfs_node.pid = p->pid;
-  p->cfs_node.vruntime = 0;
+  p->cfs_node.vruntime = p->vruntime;
   return p;
 }
 
@@ -463,11 +495,11 @@ kexit(int status)
 
   acquire(&p->lock);
 
-  if (p->nice != 0) {
-    printk(
-      "[CFS VERIFY] PID %d | nice: %d | weight: %d | ticks: %d | vruntime: %d\n",
-      p->pid, p->nice, (int)p->weight, (int)p->runtime_ticks, (int)p->vruntime);
-  }
+  //if (p->nice != 0) {
+  //  printk(
+  //    "[CFS VERIFY] PID %d | nice: %d | weight: %d | ticks: %d | vruntime: %d\n",
+  //    p->pid, p->nice, (int)p->weight, (int)p->runtime_ticks, (int)p->vruntime);
+  //}
 
   p->xstate = status;
   p->state = ZOMBIE;
@@ -576,12 +608,13 @@ scheduler(void)
     // Kiểm tra lại vì giữa Pha 1 và Pha 2 một CPU khác có thể đã lấy mất p
     if (p->state == RUNNABLE && p->cfs_node.on_rq) {
       rb_delete(&cfs_rq, &p->cfs_node);
+      p->state = RUNNING;
+      update_min_vruntime(p);
       release(&cfs_rq.lock);
 
       // Switch to chosen process.  It is the process's job
       // to release its lock and then reacquire it
       // before jumping back to us.
-      p->state = RUNNING;
       c->proc = p;
       swtch(&c->context, &p->context);
 
@@ -709,6 +742,15 @@ wakeup(void *chan)
       // If this waiting process has gotten so far as to actually
       // go to sleep, also set it back to RUNNING.
       if (p->state == SLEEPING) {
+        acquire(&cfs_rq.lock);
+        uint64 min_vr = cfs_rq.min_vruntime;
+        release(&cfs_rq.lock);
+
+        uint64 thresh = (min_vr > SLEEPER_BONUS) ? (min_vr - SLEEPER_BONUS) : 0;
+        if (p->vruntime < thresh) {
+          p->vruntime = thresh;
+        }
+
         p->state = RUNNABLE;
         cfs_enqueue(p);
       }
@@ -733,6 +775,15 @@ kkill(int pid)
     if (p->pid == pid) {
       p->killed = 1;
       if (p->state == SLEEPING) {
+        acquire(&cfs_rq.lock);
+        uint64 min_vr = cfs_rq.min_vruntime;
+        release(&cfs_rq.lock);
+
+        uint64 thresh = (min_vr > SLEEPER_BONUS) ? (min_vr - SLEEPER_BONUS) : 0;
+        if (p->vruntime < thresh) {
+          p->vruntime = thresh;
+        }
+
         // Wake process from sleep().
         p->state = RUNNABLE;
         cfs_enqueue(p);

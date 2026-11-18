@@ -2,7 +2,12 @@
 #include "kernel/stat.h"
 #include "user/user.h"
 
-// Bộ sinh số ngẫu nhiên đơn giản (Linear Congruential Generator)
+struct result {
+  int nice;
+  uint64 vruntime;
+  int ticks;
+};
+
 static unsigned int next_seed = 1;
 
 static int
@@ -18,14 +23,13 @@ srand(unsigned int seed)
   next_seed = seed;
 }
 
-// Sinh một giá trị nice ngẫu nhiên trong khoảng hợp lệ [-20, 19]
+// Sinh giá trị nice âm trong khoảng [-15, -5] để luôn so sánh được với nice = 0
 static int
-random_nice(void)
+random_negative_nice(void)
 {
-  return -20 + (rand() % 40);
+  return -15 + (rand() % 11);
 }
 
-// Hàm phụ trợ kiểm tra từng ca thử nghiệm biên (Task 5)
 static void
 check_setnice(int nice_val, int expected_ret, const char *desc)
 {
@@ -39,21 +43,25 @@ check_setnice(int nice_val, int expected_ret, const char *desc)
   }
 }
 
+static void
+cpu_work(void)
+{
+  volatile int x = 0;
+  for (int i = 0; i < 200000000; i++) {
+    x += i;
+  }
+  (void)x;
+}
+
 int
 main(int argc, char *argv[])
 {
-  // KIỂM CHỨNG TÍNH ĐÚNG ĐẮN VÀ BẢO VỆ BIÊN CỦA SETNICE
-  printf("      KIEM TRA SYSTEM CALL SETNICE     \n");
-
-  // 1. Kiem tra bat cac gia tri khong hop le (ngoai doan [-20, 19]) -> tra ve -1
-  printf("1. Kiem tra bat cac gia tri vuot nguong [-20, 19]:\n");
+  printf("=== 1. KIEM TRA BIEN SYSTEM CALL SETNICE ===\n");
   check_setnice(-25, -1, "Nho hon bien duoi (-25)");
   check_setnice(-21, -1, "Sat ngoai bien duoi (-21)");
   check_setnice(20, -1, "Sat ngoai bien tren (20)");
   check_setnice(100, -1, "Lon hon bien tren (100)");
 
-  // 2. Kiem tra thiet lap cac gia tri hop le (trong doan [-20, 19]) -> tra ve 0
-  printf("\n2. Kiem tra thiet lap cac gia tri hop le:\n");
   check_setnice(-20, 0, "Tai bien duoi hop le (-20)");
   check_setnice(19, 0, "Tai bien tren hop le (19)");
   check_setnice(0, 0, "Gia tri mac dinh (0)");
@@ -61,48 +69,88 @@ main(int argc, char *argv[])
   check_setnice(10, 0, "Gia tri uu tien thap (10)");
 
   setnice(0);
-  // KIỂM CHỨNG TỐC ĐỘ TĂNG VRUNTIME VỚI NICE NGẪU NHIÊN
-  printf("   KIEM TRA TOC DO TANG VRUNTIME       \n");
 
-  // Khoi tao seed ngau nhien tu thoi gian he thong
+  printf("\n=== 2. KIEM TRA TOC DO TANG VRUNTIME (NICE AM VS NICE 0) ===\n");
   srand(uptime());
+  int nice1 = random_negative_nice(); // Luôn âm: [-15, -5]
+  int nice2 = 0;                      // Chuẩn mặc định: 0
 
-  int nice1 = random_nice();
-  int nice2 = random_nice();
-  while (nice2 == nice1) {
-    nice2 = random_nice(); // Đảm bảo 2 tiến trình có mức nice khác nhau
+  int p1[2], p2[2];
+  if (pipe(p1) < 0 || pipe(p2) < 0) {
+    printf("[FAIL] Khong tao duoc pipe\n");
+    exit(1);
   }
 
-  printf("Sinh ngau nhien muc nice:\n");
-  printf("  -> Tien trinh con 1: nice = %d\n", nice1);
-  printf("  -> Tien trinh con 2: nice = %d\n", nice2);
-  printf("Dang chay tinh toan CPU de do luong...\n\n");
+  printf("Cau hinh do luong:\n");
+  printf("  -> Tien trinh con 1: nice = %d (uu tien cao)\n", nice1);
+  printf("  -> Tien trinh con 2: nice = %d (mac dinh)\n", nice2);
+  printf("Dang chay tinh toan CPU...\n");
 
-  // Tiến trình con 1
   int pid1 = fork();
   if (pid1 == 0) {
+    close(p1[0]);
     setnice(nice1);
-    volatile int x = 0;
-    for (int i = 0; i < 200000000; i++)
-      x += i;
-    (void)x;
+    int t_start = uptime();
+    cpu_work();
+    int t_end = uptime();
+
+    struct result res;
+    res.nice = nice1;
+    res.vruntime = getvruntime();
+    res.ticks = t_end - t_start;
+    write(p1[1], &res, sizeof(res));
+    close(p1[1]);
     exit(0);
   }
 
-  // Tiến trình con 2
   int pid2 = fork();
   if (pid2 == 0) {
+    close(p2[0]);
     setnice(nice2);
-    volatile int x = 0;
-    for (int i = 0; i < 200000000; i++)
-      x += i;
-    (void)x;
+    int t_start = uptime();
+    cpu_work();
+    int t_end = uptime();
+
+    struct result res;
+    res.nice = nice2;
+    res.vruntime = getvruntime();
+    res.ticks = t_end - t_start;
+    write(p2[1], &res, sizeof(res));
+    close(p2[1]);
     exit(0);
   }
 
-  // Chờ cả 2 tiến trình con hoàn tất
+  close(p1[1]);
+  close(p2[1]);
+
+  struct result r1, r2;
+  if (read(p1[0], &r1, sizeof(r1)) != sizeof(r1) ||
+      read(p2[0], &r2, sizeof(r2)) != sizeof(r2)) {
+    printf("[FAIL] Loi doc du lieu tu pipe\n");
+    exit(1);
+  }
+  close(p1[0]);
+  close(p2[0]);
+
   wait(0);
   wait(0);
 
-  exit(0);
+  printf("\nKet qua do luong:\n");
+  printf("  -> Con 1 (nice = %d): vruntime = %lu, thoi gian = %d ticks\n",
+         r1.nice, r1.vruntime, r1.ticks);
+  printf("  -> Con 2 (nice = %d): vruntime = %lu, thoi gian = %d ticks\n",
+         r2.nice, r2.vruntime, r2.ticks);
+
+  if (r1.vruntime > 0 && r1.vruntime < r2.vruntime) {
+    printf(
+      "[PASS] Tien trinh nice am (%d) co vruntime tang cham hon nice 0 (%lu < %lu)\n",
+      r1.nice, r1.vruntime, r2.vruntime);
+    printf("\nALL TESTNICE CHECKS PASSED!\n");
+    exit(0);
+  } else {
+    printf(
+      "[FAIL] Ky vong vruntime(nice=%d) < vruntime(nice=0) nhung nhan %lu >= %lu\n",
+      r1.nice, r1.vruntime, r2.vruntime);
+    exit(1);
+  }
 }
