@@ -460,8 +460,8 @@ def main():
     nn.add_argument("--case", action="append",
                     help="danh sach nice, vd --case=0,5 (lap lai duoc; dung dau = "
                          "de ho tro so am: --case=-5,0)")
-    nn.add_argument("--tol", type=float, default=0.10,
-                    help="sai so toi da cho phep cua ty le chia se (mac dinh 0.10)")
+    nn.add_argument("--tol", type=float, default=0.03,
+                    help="sai so toi da cho phep cua ty le chia se (mac dinh 0.03)")
     nn.add_argument("--no-build", action="store_true")
     nn.set_defaults(func=cmd_nice)
 
