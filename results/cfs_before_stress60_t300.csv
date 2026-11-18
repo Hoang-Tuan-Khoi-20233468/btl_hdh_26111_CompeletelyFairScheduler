@@ -1,0 +1,11 @@
+label,cpus,hogs,ticks,limit,rep,status,samples,max_latency,avg_x10
+cfs_before_60_t300,1,60,300,10,1,PASS,240,1,10
+cfs_before_60_t300,1,60,300,10,2,PASS,200,1,10
+cfs_before_60_t300,1,60,300,10,3,PASS,201,1,10
+cfs_before_60_t300,1,60,300,10,4,PASS,236,1,10
+cfs_before_60_t300,1,60,300,10,5,PASS,240,1,10
+cfs_before_60_t300,1,60,300,10,6,PASS,240,1,10
+cfs_before_60_t300,1,60,300,10,7,PASS,240,1,10
+cfs_before_60_t300,1,60,300,10,8,PASS,179,1,10
+cfs_before_60_t300,1,60,300,10,9,PASS,240,1,10
+cfs_before_60_t300,1,60,300,10,10,PASS,240,1,10
