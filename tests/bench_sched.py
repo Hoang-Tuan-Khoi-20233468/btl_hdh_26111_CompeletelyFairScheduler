@@ -43,7 +43,27 @@ FIELDS = [
     "label", "cpus", "n", "ticks", "rep", "status",
     "total", "min", "max", "ratio", "jain", "counts",
 ]
+FIELDS_NICE = ["label", "cpus", "case", "rep", "status", "err", "shares",
+               "expected"]
+FIELDS_STRESS = ["label", "cpus", "hogs", "ticks", "limit", "rep", "status",
+                 "samples", "max_latency", "avg_x10"]
+DEFAULT_CASES = ["0,5", "0,10", "5,10", "0,0,10,10", "-5,0", "-10,0,10"]
+STRESS_RE = re.compile(r"^cfsstress: (PASS|FAIL)\s*$", re.M)
+STRESS_DONE_RE = r"^cfsstress: (PASS|FAIL)[^\n]*\n"
+PROBE_RE = re.compile(
+    r"^probe: samples=(\d+) max_latency=(\d+) avg_x10=(\d+)", re.M)
 
+# Bang trong so cua Linux (prio_to_weight), chi so = nice + 20.
+PRIO_TO_WEIGHT = [
+    88761, 71755, 56483, 46273, 36291, 29154, 23254, 18705, 14949, 11916,
+    9548, 7620, 6100, 4904, 3906, 3121, 2501, 1991, 1586, 1277,
+    1024, 820, 655, 526, 423, 335, 272, 215, 172, 137,
+    110, 87, 70, 56, 45, 36, 29, 23, 18, 15,
+]
+
+
+def weight_of(nice):
+    return PRIO_TO_WEIGHT[nice + 20]
 
 class Qemu:
     """Chay 'make qemu CPUS=k' va doc/ghi qua stdin, stdout."""
@@ -144,21 +164,30 @@ def check_run(n, parsed):
     return ""
 
 
-def run_once(cpus, n, ticks, boot_timeout=90):
-    """Mot lan do. Tra ve (parsed, loi)."""
+def run_cmd(cpus, cmd, done_re, timeout, boot_timeout=90):
+    """Chay mot lenh trong shell xv6. Tra ve (van ban ket qua, loi)."""
     q = Qemu(cpus)
     try:
         if not q.wait_for(BOOT_RE, boot_timeout):
             return None, "xv6 khong khoi dong duoc (khong thay 'init: starting sh')"
         mark = len(q.buf)
-        q.send("schedtest %d %d\n" % (n, ticks))
-        run_timeout = max(60, ticks * 0.5 + 30)
-        if not q.wait_for(TOTAL_WAIT_RE, run_timeout, start=mark):
-            return None, "het thoi gian cho ket qua schedtest (%ds)" % run_timeout
-        return parse_schedtest(q.buf[mark:]), ""
+        q.send(cmd + "\n")
+        if not q.wait_for(done_re, timeout, start=mark):
+            return None, "het thoi gian cho ket qua (%ds)" % timeout
+        return q.buf[mark:], ""
     finally:
         q.stop()
 
+
+def run_once(cpus, n, ticks, nices=None):
+    """Mot lan do schedtest. Tra ve (parsed, loi)."""
+    cmd = "schedtest %d %d" % (n, ticks)
+    if nices:
+        cmd += " " + " ".join(str(x) for x in nices)
+    text, err = run_cmd(cpus, cmd, TOTAL_WAIT_RE, max(60, ticks * 0.5 + 30))
+    if err:
+        return None, err
+    return parse_schedtest(text), ""
 
 def build():
     print("== Build kernel va fs.img ==")
@@ -211,7 +240,135 @@ def cmd_run(args):
     print("PASS: moi lan do deu hop le")
     return 0
 
+def cmd_nice(args):
+    """Kiem tra muc chia se CPU co khop ty le trong so nice khong."""
+    if not args.no_build:
+        build()
+    cases = args.case or DEFAULT_CASES
+    out_dir = os.path.dirname(args.out)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    new_file = not os.path.exists(args.out)
+    failures = 0
+    summary = {}
+    with open(args.out, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=FIELDS_NICE, lineterminator="\n")
+        if new_file:
+            w.writeheader()
+        for cpus in args.cpus:
+            for case in cases:
+                nices = [int(x) for x in case.split(",")]
+                n = len(nices)
+                for rep in range(1, args.reps + 1):
+                    parsed, err = run_once(cpus, n, args.ticks, nices)
+                    if not err:
+                        err = check_run(n, parsed)
+                    tag = "cpus=%d nice=%s rep=%d/%d" % (cpus, case, rep, args.reps)
+                    if err:
+                        failures += 1
+                        print("[FAIL] %s: %s" % (tag, err), flush=True)
+                        w.writerow({"label": args.label, "cpus": cpus,
+                                    "case": case, "rep": rep,
+                                    "status": "FAIL"})
+                        f.flush()
+                        continue
+                    counts, total = parsed[0], parsed[1]
+                    ws = [weight_of(x) for x in nices]
+                    expected = [x / sum(ws) for x in ws]
+                    shares = [c / total for c in counts]
+                    dev = max(abs(a - b) for a, b in zip(shares, expected))
+                    ok = dev <= args.tol
+                    failures += 0 if ok else 1
+                    summary.setdefault((cpus, case), []).append((ok, dev))
+                    print("[%s] %s err=%.3f shares=%s expected=%s" % (
+                        "PASS" if ok else "FAIL", tag, dev,
+                        "/".join("%.2f" % x for x in shares),
+                        "/".join("%.2f" % x for x in expected)), flush=True)
+                    w.writerow({"label": args.label, "cpus": cpus,
+                                "case": case, "rep": rep,
+                                "status": "PASS" if ok else "FAIL",
+                                "err": "%.6f" % dev,
+                                "shares": " ".join("%.4f" % x for x in shares),
+                                "expected": " ".join("%.4f" % x for x in expected)})
+                    f.flush()
+    print("\n== Tong ket nice '%s' (sai so lon nhat so voi ty le trong so) =="
+          % args.label)
+    print("%-5s %-14s %-8s %-18s" % ("CPUS", "nice", "pass", "err trung binh"))
+    for (cpus, case) in sorted(summary):
+        v = summary[(cpus, case)]
+        errs = [d for _, d in v]
+        print("%-5d %-14s %-8s %.3f +- %.3f" % (
+            cpus, case, "%d/%d" % (sum(1 for ok, _ in v if ok), len(v)),
+            statistics.mean(errs),
+            statistics.stdev(errs) if len(errs) > 1 else 0.0))
+    if failures:
+        print("FAIL: %d lan do khong dat (nguong sai so %.2f)" % (failures, args.tol))
+        return 1
+    print("PASS: moi lan do deu dat")
+    return 0
 
+
+def cmd_stress(args):
+    """Chay cfsstress nhieu lan, o tung so CPU."""
+    if not args.no_build:
+        build()
+    out_dir = os.path.dirname(args.out)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    new_file = not os.path.exists(args.out)
+    failures = 0
+    rows = []
+    with open(args.out, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=FIELDS_STRESS, lineterminator="\n")
+        if new_file:
+            w.writeheader()
+        for cpus in args.cpus:
+            for rep in range(1, args.reps + 1):
+                cmd = "cfsstress %d %d %d" % (args.hogs, args.ticks, args.limit)
+                text, err = run_cmd(cpus, cmd, STRESS_DONE_RE,
+                                    max(90, args.ticks * 0.5 + 60))
+                tag = "cpus=%d hogs=%d rep=%d/%d" % (cpus, args.hogs, rep, args.reps)
+                m = STRESS_RE.search(text) if text else None
+                pm = PROBE_RE.search(text) if text else None
+                if err or not m or not pm:
+                    failures += 1
+                    print("[FAIL] %s: %s" % (tag, err or "khong doc duoc ket qua"),
+                          flush=True)
+                    w.writerow({"label": args.label, "cpus": cpus,
+                                "hogs": args.hogs, "ticks": args.ticks,
+                                "limit": args.limit, "rep": rep, "status": "FAIL"})
+                    f.flush()
+                    continue
+                ok = m.group(1) == "PASS"
+                failures += 0 if ok else 1
+                samples, mx, avg = (int(pm.group(i)) for i in (1, 2, 3))
+                rows.append((cpus, ok, mx, avg))
+                print("[%s] %s samples=%d max_latency=%d tick avg=%.1f tick" % (
+                    "PASS" if ok else "FAIL", tag, samples, mx, avg / 10.0),
+                    flush=True)
+                w.writerow({"label": args.label, "cpus": cpus, "hogs": args.hogs,
+                            "ticks": args.ticks, "limit": args.limit,
+                            "rep": rep, "status": "PASS" if ok else "FAIL",
+                            "samples": samples, "max_latency": mx,
+                            "avg_x10": avg})
+                f.flush()
+    print("\n== Tong ket stress '%s' (hogs=%d, gioi han %d tick) =="
+          % (args.label, args.hogs, args.limit))
+    print("%-5s %-8s %-22s %-18s" % ("CPUS", "pass", "max_latency (tick)", "avg (tick)"))
+    for cpus in args.cpus:
+        v = [r for r in rows if r[0] == cpus]
+        if not v:
+            continue
+        mxs = [r[2] for r in v]
+        avs = [r[3] / 10.0 for r in v]
+        print("%-5d %-8s max=%d, tb=%.1f      %.2f" % (
+            cpus, "%d/%d" % (sum(1 for r in v if r[1]), args.reps),
+            max(mxs), statistics.mean(mxs), statistics.mean(avs)))
+    if failures:
+        print("FAIL: %d lan chay khong dat" % failures)
+        return 1
+    print("PASS: moi lan chay deu dat")
+    return 0
 def read_rows(path, label=None):
     rows = []
     with open(path, newline="") as f:
@@ -294,7 +451,31 @@ def main():
     r.add_argument("--ns", type=int, nargs="+", default=[1, 2, 4, 8])
     r.add_argument("--no-build", action="store_true", help="bo qua buoc make")
     r.set_defaults(func=cmd_run)
+    nn = sub.add_parser("nice", help="kiem tra chia se CPU theo trong so nice")
+    nn.add_argument("--label", required=True)
+    nn.add_argument("--out", required=True)
+    nn.add_argument("--reps", type=int, default=5)
+    nn.add_argument("--ticks", type=int, default=100)
+    nn.add_argument("--cpus", type=int, nargs="+", default=[1, 4])
+    nn.add_argument("--case", action="append",
+                    help="danh sach nice, vd --case=0,5 (lap lai duoc; dung dau = "
+                         "de ho tro so am: --case=-5,0)")
+    nn.add_argument("--tol", type=float, default=0.10,
+                    help="sai so toi da cho phep cua ty le chia se (mac dinh 0.10)")
+    nn.add_argument("--no-build", action="store_true")
+    nn.set_defaults(func=cmd_nice)
 
+    st = sub.add_parser("stress", help="thu ap luc voi cfsstress")
+    st.add_argument("--label", required=True)
+    st.add_argument("--out", required=True)
+    st.add_argument("--reps", type=int, default=10, help="mac dinh 10 lan")
+    st.add_argument("--hogs", type=int, default=50)
+    st.add_argument("--ticks", type=int, default=100)
+    st.add_argument("--limit", type=int, default=10,
+                    help="do tre danh thuc toi da cho phep (tick)")
+    st.add_argument("--cpus", type=int, nargs="+", default=[1, 4])
+    st.add_argument("--no-build", action="store_true")
+    st.set_defaults(func=cmd_stress)
     c = sub.add_parser("compare", help="so sanh hai file CSV")
     c.add_argument("a")
     c.add_argument("b")
