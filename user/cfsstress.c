@@ -28,7 +28,18 @@ parse_int(const char *s)
     v = v * 10 + (*s++ - '0');
   return v;
 }
+// Chờ cha tạo xong mọi tiến trình, rồi nhận mốc kết thúc chung qua pipe.
+// Nếu cha chết trước khi gửi (đầu ghi đóng, đọc được 0 byte) thì thoát.
+static int
+wait_start(int fd)
+{
+  int end = 0;
 
+  if (read(fd, &end, sizeof(end)) != sizeof(end))
+    exit(1);
+  close(fd);
+  return end;
+}
 // Ngốn CPU đến khi uptime() >= end.
 static void
 hog(int end)
@@ -65,6 +76,7 @@ main(int argc, char *argv[])
 {
   int hogs = 50, ticks = 100, limit = 10;
   int fds[2];
+  int go[2];
   int forked = 0, reaped = 0, ok = 1;
   struct probe_result res = {0, 0, 0};
 
@@ -83,7 +95,10 @@ main(int argc, char *argv[])
     exit(1);
   }
 
-  int end = uptime() + ticks;
+  if (pipe(go) < 0) {
+    fprintf(2, "cfsstress: pipe go failed\n");
+    exit(1);
+  }
 
   for (int i = 0; i < hogs; i++) {
     int pid = fork();
@@ -95,7 +110,8 @@ main(int argc, char *argv[])
     if (pid == 0) {
       close(fds[0]);
       close(fds[1]);
-      hog(end);
+      close(go[1]); // để đọc được EOF nếu cha chết sớm
+      hog(wait_start(go[0]));
       exit(0);
     }
     forked++;
@@ -108,13 +124,20 @@ main(int argc, char *argv[])
     ok = 0;
   } else if (ppid == 0) {
     close(fds[0]);
-    probe(end, fds[1]);
+    close(go[1]);
+    probe(wait_start(go[0]), fds[1]);
     close(fds[1]);
     exit(0);
   } else {
     forked++;
   }
-
+  // Đã tạo xong mọi tiến trình: bắt đầu cửa sổ đo và gửi mốc cho từng con.
+  // Tối đa (60 + 1) * 4 = 244 byte, nhỏ hơn bộ đệm pipe 512 byte nên không bị chặn.
+  int end = uptime() + ticks;
+  for (int i = 0; i < forked; i++)
+    write(go[1], &end, sizeof(end));
+  close(go[1]);
+  close(go[0]);
   close(fds[1]);
   if (ppid > 0 && read(fds[0], &res, sizeof(res)) != sizeof(res)) {
     printf("cfsstress: khong doc duoc ket qua cua tien trinh tham do\n");

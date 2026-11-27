@@ -128,3 +128,8 @@ sys_setnice(void)
 
   return 0;
 }
+uint64
+sys_freepages(void)
+{
+  return kfreepages();
+}

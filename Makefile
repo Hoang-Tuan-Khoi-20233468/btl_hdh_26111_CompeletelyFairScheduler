@@ -155,6 +155,8 @@ UPROGS=\
 	$U/_sync\
 	$U/_cfsstress\
 	$U/_testnice\
+	$U/_freetest\
+	$U/_projecttests\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

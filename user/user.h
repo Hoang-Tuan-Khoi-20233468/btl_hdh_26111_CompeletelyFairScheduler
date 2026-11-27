@@ -27,6 +27,7 @@ int uptime(void);
 int sync(void);
 int setnice(int);
 uint64 getvruntime(void);
+int freepages(void);
 
 // ulib.c
 int stat(const char *, struct stat *);
