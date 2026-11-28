@@ -82,7 +82,7 @@ usertrap(void)
     kexit(-1);
 
   // give up the CPU if this is a timer interrupt.
-if (which_dev == 2) {
+  if (which_dev == 2) {
     update_vruntime(p);
     if (cfs_should_resched(p))
       yield();
@@ -157,7 +157,7 @@ kerneltrap()
   }
 
   // give up the CPU if this is a timer interrupt.
- if (which_dev == 2 && myproc() != 0 && myproc()->state == RUNNING) {
+  if (which_dev == 2 && myproc() != 0 && myproc()->state == RUNNING) {
     update_vruntime(myproc());
     if (cfs_should_resched(myproc()))
       yield();

@@ -82,30 +82,54 @@ update_vruntime(struct proc *p)
 static uint64
 cfs_calc_slice(struct proc *p)
 {
-  uint64 nr = cfs_rq.nr_running + 1;            // +1 là chính p
-  uint64 period = SCHED_LATENCY;
-  if (nr * SCHED_MIN_GRAN > period)             // quá đông: kéo dài chu kỳ
-    period = nr * SCHED_MIN_GRAN;
-  uint64 total = cfs_rq.load_weight + p->weight;
-  uint64 slice = period * p->weight / total;
-  if (slice < SCHED_MIN_GRAN)
-    slice = SCHED_MIN_GRAN;
+  uint64 nr = cfs_rq.nr_running + 1;
+
+  uint64 period = TARGET_LATENCY;
+
+  if (nr * MIN_GRANULARITY > period)
+    period = nr * MIN_GRANULARITY;
+
+  uint64 total_weight = cfs_rq.load_weight + p->weight;
+
+  if (total_weight == 0)
+    return MIN_GRANULARITY;
+
+  uint64 slice = period * p->weight / total_weight;
+
+  if (slice < MIN_GRANULARITY)
+    slice = MIN_GRANULARITY;
+
   return slice;
 }
-
 // Gọi mỗi tick sau update_vruntime(). 1 = p nên nhường CPU.
 int
 cfs_should_resched(struct proc *p)
 {
-  uint64 nr;
+  struct rb_node *min;
+  int should_resched = 0;
+
   if (p == 0 || p->state != RUNNING)
     return 0;
+
   acquire(&cfs_rq.lock);
-  nr = cfs_rq.nr_running;
+
+  min = rb_min(&cfs_rq);
+
+  if (min != 0) {
+    // Tiến trình trong hàng đợi có vruntime nhỏ hơn
+    // tiến trình đang chạy.
+    if (min->vruntime < p->vruntime) {
+      should_resched = 1;
+    }
+    // Nếu không, kiểm tra time slice.
+    else if (p->runtime_ticks - p->start_tick >= p->time_slice) {
+      should_resched = 1;
+    }
+  }
+
   release(&cfs_rq.lock);
-  if (nr == 0)                                  // không ai tranh CPU
-    return 0;
-  return (p->runtime_ticks - p->start_tick) >= p->time_slice;
+
+  return should_resched;
 }
 void
 proc_mapstacks(pagetable_t kpgtbl)
@@ -607,15 +631,10 @@ scheduler(void)
     if (p->state == RUNNABLE && p->cfs_node.on_rq) {
       rb_delete(&cfs_rq, &p->cfs_node);
       cfs_rq.load_weight -= p->weight;
-      p->time_slice = cfs_calc_slice(p);   // tính khi còn giữ cfs_rq.lock
-      p->start_tick = p->runtime_ticks;    // mốc bắt đầu lượt chạy
+      p->time_slice = cfs_calc_slice(p);
+      p->start_tick = p->runtime_ticks;
+
       release(&cfs_rq.lock);
-      uint64 nr = cfs_rq.nr_running + 1; 
-      p->time_slice = (p->weight * TARGET_LATENCY) / (nr * 1024);
-      if (p->time_slice < MIN_GRANULARITY) {
-          p->time_slice = MIN_GRANULARITY;
-      }
-      p->start_tick = 0;
 
       // Switch to chosen process.  It is the process's job
       // to release its lock and then reacquire it
